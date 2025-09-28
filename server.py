@@ -1,5 +1,6 @@
 import socket
-from typing import Optional, Tuple
+import threading
+from typing import Optional, Tuple, List
 
 
 class ChatServer:
@@ -20,6 +21,8 @@ class ChatServer:
         self.port = port
         self.socket: Optional[socket.socket] = None
         self.is_running = False
+        self.clients: List[Tuple[socket.socket, Tuple[str, int]]] = []
+        self.clients_lock = threading.Lock()
 
     def start_server(self) -> None:
         """
@@ -37,7 +40,7 @@ class ChatServer:
             self.socket.bind((self.host, self.port))
 
             # Start listening for incoming connections (max 1 pending connection)
-            self.socket.listen(1)
+            self.socket.listen(10)
             self.is_running = True
 
             print(f"🚀 Server started and listening on {self.host}:{self.port}")
@@ -61,9 +64,19 @@ class ChatServer:
                 # Accept a client connection (blocking call)
                 client_socket, client_address = self.socket.accept()
                 print(f"✅ New client connected from {client_address}")
+                self._broadcast_message(f"{client_address} has joined the chat.", client_socket)
 
-                # Handle the client communication
-                self._handle_client(client_socket, client_address)
+                # Add client to list
+                with self.clients_lock:
+                    self.clients.append((client_socket, client_address))
+                    
+                # Handle each client in a separate thread
+                client_thread = threading.Thread(
+                    target=self._handle_client,
+                    args=(client_socket, client_address)
+                )
+                client_thread.daemon = True
+                client_thread.start()
 
             except socket.error as e:
                 if self.is_running:  # Only show error if server is supposed to be running
@@ -83,7 +96,7 @@ class ChatServer:
                 print(f"💬 Chat session started with {client_address}")
                 print("Type your messages to send to the client. Press Ctrl+C to disconnect.")
 
-                while True:
+                while self.is_running:
                     # Receive message from client
                     message_data = client_socket.recv(1024)
 
@@ -94,20 +107,49 @@ class ChatServer:
 
                     # Decode and display client message
                     client_message = message_data.decode('utf-8')
-                    print(f"📨 Client: {client_message}")
+                    print(f"📨 Client: {client_address} {client_message}")
 
-                    # Get server response from user input
-                    server_reply = input("📤 Server reply: ")
+                    # Broadcast message to all other clients
+                    # self._broadcast_message(f"Client {client_address}: {client_message}", client_socket)
+                    self._broadcast_message(f"{client_message}", client_socket)
 
-                    # Send reply back to client
-                    client_socket.sendall(server_reply.encode('utf-8'))
+                    # # Send acknowledgment back to sender
+                    # ack_message = f"Message received: {client_message}"
+                    # client_socket.sendall(ack_message.encode('utf-8'))
 
         except ConnectionResetError:
             print(f"🔌 Client {client_address} disconnected unexpectedly")
+            self._broadcast_message(f"{client_address} has left the chat.", client_socket)
+
         except KeyboardInterrupt:
             print(f"\n🛑 Disconnecting from client {client_address}")
         except Exception as e:
             print(f"❌ Error handling client {client_address}: {e}")
+        finally:
+            self._remove_client(client_socket, client_address)
+
+    def _broadcast_message(self, message: str, sender_socket: socket.socket):
+        """Broadcast message to all connected clients except sender."""
+        with self.clients_lock:
+            for client_socket, client_address in self.clients[:]:
+                if client_socket != sender_socket:
+                    try:
+                        client_socket.sendall(message.encode('utf-8'))
+                    except:
+                        # Remove disconnected client
+                        self._remove_client(client_socket, client_address)
+
+    def _remove_client(self, client_socket: socket.socket, client_address: Tuple[str, int]):
+        """Remove client from active clients list."""
+        with self.clients_lock:
+            try:
+                self._broadcast_message(f"{client_address} has left the chat.", client_socket)
+                self.clients.remove((client_socket, client_address))
+                client_socket.close()
+                print(f"🗑️ Removed client {client_address}")
+
+            except ValueError:
+                pass  # Client already removed
 
     def stop_server(self) -> None:
         """

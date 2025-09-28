@@ -1,177 +1,174 @@
 import socket
+import threading
+import sys
 from typing import Optional
 
 
 class ChatClient:
-    """
-    A simple TCP chat client that connects to a server and enables
-    bidirectional communication between client and server.
-    """
-
-    def __init__(self, host: str = '127.0.0.1', port: int = 65432):
-        """
-        Initialize the chat client with server connection details.
-
-        Args:
-            host (str): The server's IP address to connect to (default: localhost)
-            port (int): The server's port number to connect to (default: 65432)
-        """
+    def __init__(self, host: str = '127.0.0.1', port: int = 65432, client_name: str = None):
         self.host = host
         self.port = port
+        self.client_name = client_name or f"Client-{id(self)}"
         self.socket: Optional[socket.socket] = None
         self.is_connected = False
+        self.running = False
 
-    def connect_to_server(self) -> bool:
+    def connect_to_server(self, bind_address: tuple = None) -> bool:
         """
-        Establish connection to the server.
-
-        Returns:
-            bool: True if connection successful, False otherwise
+        Connect to server, optionally binding to specific local address/port.
+        
+        Args:
+            bind_address: Tuple of (local_ip, local_port) to bind client socket to
         """
         try:
-            # Create a TCP socket using IPv4
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-            # Connect to the server
+            
+            # Bind to specific local address/port if provided
+            if bind_address:
+                self.socket.bind(bind_address)
+                print(f"🔗 Binding client to local address {bind_address}")
+            
             self.socket.connect((self.host, self.port))
             self.is_connected = True
+            self.running = True
 
-            print(f"✅ Successfully connected to server at {self.host}:{self.port}")
+            # Get actual local address after connection
+            local_addr = self.socket.getsockname()
+            print(f"✅ {self.client_name} connected to server at {self.host}:{self.port}")
+            print(f"📍 Local address: {local_addr}")
             return True
 
-        except ConnectionRefusedError:
-            print(f"❌ Connection refused. Make sure the server is running on {self.host}:{self.port}")
-            return False
-        except socket.gaierror:
-            print(f"❌ Invalid host address: {self.host}")
+        except OSError as e:
+            if "Address already in use" in str(e):
+                print(f"❌ Local address {bind_address} already in use")
+            else:
+                print(f"❌ Connection error: {e}")
             return False
         except Exception as e:
             print(f"❌ Error connecting to server: {e}")
             return False
 
     def start_chat(self) -> None:
-        """
-        Start the chat session with the server.
-        Handles sending messages to server and receiving replies.
-        """
         if not self.is_connected or not self.socket:
             print("❌ Not connected to server. Please connect first.")
             return
 
         try:
-            print("💬 Chat session started!")
+            print(f"💬 Chat session started for {self.client_name}!")
             print("Type your messages and press Enter to send.")
-            print("Press Enter with empty message to quit.\n")
+            print("Type 'quit' or 'exit' to leave the chat.\n")
 
-            while True:
-                # Get message from user
-                user_message = input("📤 Your message: ")
+            # Start receiver thread for incoming messages
+            receiver_thread = threading.Thread(target=self._receive_messages)
+            receiver_thread.daemon = True
+            receiver_thread.start()
 
-                # Check if user wants to quit (empty message)
-                if not user_message.strip():
-                    print("👋 Ending chat session...")
-                    break
-
-                # Send message to server
-                if not self._send_message(user_message):
-                    break
-
-                # Receive and display server response
-                server_response = self._receive_message()
-                if server_response is None:
-                    break
-
-                print(f"📨 Server: {server_response}")
+            # Handle user input in main thread
+            self._handle_user_input()
 
         except KeyboardInterrupt:
-            print("\n🛑 Chat interrupted by user")
+            print(f"\n🛑 {self.client_name} interrupted by user")
         except Exception as e:
             print(f"❌ Error during chat: {e}")
         finally:
             self.disconnect()
 
-    def _send_message(self, message: str) -> bool:
-        """
-        Send a message to the server.
-
-        Args:
-            message (str): The message to send
-
-        Returns:
-            bool: True if message sent successfully, False otherwise
-        """
+    def _receive_messages(self) -> None:
         try:
-            # Encode message to bytes and send to server
+            while self.running and self.is_connected:
+                data = self.socket.recv(1024)
+                
+                if not data:
+                    print("🔌 Server closed the connection")
+                    self.running = False
+                    break
+
+                message = data.decode('utf-8')
+                print(f"\n📨 {message}")
+                print(f"📤 {self.client_name}: ", end="", flush=True)
+
+        except ConnectionResetError:
+            if self.running:
+                print("\n❌ Server disconnected unexpectedly")
+            self.running = False
+        except Exception as e:
+            if self.running:
+                print(f"\n❌ Error receiving message: {e}")
+            self.running = False
+
+    def _handle_user_input(self) -> None:
+        try:
+            while self.running and self.is_connected:
+                user_message = input(f"📤 {self.client_name}: ")
+
+                if user_message.lower() in ['quit', 'exit', '']:
+                    print(f"👋 {self.client_name} ending chat session...")
+                    break
+
+                # Prefix message with client name
+                formatted_message = f"[{self.client_name}]: {user_message}"
+                if not self._send_message(formatted_message):
+                    break
+
+        except EOFError:
+            print(f"\n👋 {self.client_name} ending chat session...")
+        except KeyboardInterrupt:
+            print(f"\n🛑 {self.client_name} interrupted by user")
+
+    def _send_message(self, message: str) -> bool:
+        try:
             self.socket.sendall(message.encode('utf-8'))
             return True
         except ConnectionResetError:
             print("❌ Server disconnected unexpectedly")
+            self.running = False
             return False
         except Exception as e:
             print(f"❌ Error sending message: {e}")
             return False
 
-    def _receive_message(self) -> Optional[str]:
-        """
-        Receive a message from the server.
-
-        Returns:
-            str: The received message, or None if error occurred
-        """
-        try:
-            # Receive data from server (up to 1024 bytes)
-            data = self.socket.recv(1024)
-
-            # Check if server closed connection
-            if not data:
-                print("🔌 Server closed the connection")
-                return None
-
-            # Decode bytes to string and return
-            return data.decode('utf-8')
-
-        except ConnectionResetError:
-            print("❌ Server disconnected unexpectedly")
-            return None
-        except Exception as e:
-            print(f"❌ Error receiving message: {e}")
-            return None
-
     def disconnect(self) -> None:
-        """
-        Disconnect from the server and clean up resources.
-        """
+        self.running = False
+        self.is_connected = False
+        
         if self.socket:
             try:
                 self.socket.close()
-                print("🔌 Disconnected from server")
+                print(f"🔌 {self.client_name} disconnected from server")
             except Exception as e:
                 print(f"❌ Error during disconnect: {e}")
 
-        self.is_connected = False
         self.socket = None
-
-    def is_connection_active(self) -> bool:
-        """
-        Check if the connection to server is still active.
-
-        Returns:
-            bool: True if connected, False otherwise
-        """
-        return self.is_connected and self.socket is not None
 
 
 def main():
-    """
-    Main function to create and run the chat client.
-    """
-    # Create client instance with default server settings
-    client = ChatClient()
+    # Parse command line arguments for custom configuration
+    if len(sys.argv) >= 2:
+        client_name = sys.argv[1]
+    else:
+        client_name = input("Enter client name (or press Enter for auto-generated): ").strip()
+        if not client_name:
+            client_name = None
+
+    # Optional: bind to specific local port
+    local_port = None
+    if len(sys.argv) >= 3:
+        try:
+            local_port = int(sys.argv[2])
+        except ValueError:
+            print("Invalid port number provided")
+            return
+
+    # Create client instance
+    client = ChatClient(client_name=client_name)
 
     try:
-        # Attempt to connect to server
-        if client.connect_to_server():
-            # Start chat session if connection successful
+        # Determine bind address
+        bind_address = None
+        if local_port:
+            bind_address = ('127.0.0.1', local_port)
+
+        if client.connect_to_server(bind_address):
             client.start_chat()
         else:
             print("❌ Failed to connect to server. Exiting...")
@@ -180,7 +177,6 @@ def main():
         print(f"❌ Unexpected error: {e}")
 
     finally:
-        # Ensure proper cleanup
         client.disconnect()
 
 

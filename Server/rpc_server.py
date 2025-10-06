@@ -1,5 +1,5 @@
 import socket
-import threading
+import selectors
 import json
 import logging
 from typing import Optional, Tuple, List, Callable, Dict, Any
@@ -15,8 +15,9 @@ class RpcServer:
         self.port = port
         self.socket: Optional[socket.socket] = None
         self.is_running = False
-        self.clients: List[Tuple[socket.socket, Tuple[str, int]]] = []
-        self.clients_lock = threading.Lock()
+        self.selector = selectors.DefaultSelector()
+        self.clients: Dict[socket.socket, Tuple[str, int]] = {}
+        self.client_buffers: Dict[socket.socket, str] = {}
         self.message_handlers: Dict[str, Callable] = {}
         self._setup_logging()
 
@@ -39,7 +40,8 @@ class RpcServer:
             self._create_and_bind_socket()
             self._start_listening()
             self.logger.info(f"RPC Server started on {self.host}:{self.port}")
-            self._accept_connections()
+            self._register_server_socket()
+            self._event_loop()
         except Exception as e:
             self.logger.error(f"Error starting RPC server: {e}")
             raise
@@ -49,7 +51,7 @@ class RpcServer:
     def _create_and_bind_socket(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.settimeout(RpcServerConfig.SOCKET_TIMEOUT)
+        self.socket.setblocking(False)
         self.socket.bind((self.host, self.port))
 
     def _start_listening(self) -> None:
@@ -58,71 +60,59 @@ class RpcServer:
         print(f"RPC Server started and listening on {self.host}:{self.port}")
         print("Waiting for client connections...")
 
-    def _accept_connections(self) -> None:
+    def _register_server_socket(self) -> None:
+        self.selector.register(self.socket, selectors.EVENT_READ, data=None)
+
+    def _event_loop(self) -> None:
         while self.is_running:
             try:
-                client_socket, client_address = self.socket.accept()
-                self.logger.info(f"New client connected from {client_address}")
-
-                self._add_client(client_socket, client_address)
-                self._start_client_handler(client_socket, client_address)
-
-            except socket.timeout:
-                continue
-            except socket.error as e:
-                if self.is_running:
-                    self.logger.error(f"Error accepting connection: {e}")
-                break
+                events = self.selector.select(timeout=1)
+                for key, mask in events:
+                    if key.data is None:
+                        self._accept_connection(key.fileobj)
+                    else:
+                        self._handle_client_event(key, mask)
             except Exception as e:
-                self.logger.error(f"Unexpected error in accept_connections: {e}")
+                self.logger.error(f"Error in event loop: {e}")
                 break
+
+    def _accept_connection(self, server_socket: socket.socket) -> None:
+        try:
+            client_socket, client_address = server_socket.accept()
+            self.logger.info(f"New client connected from {client_address}")
+            client_socket.setblocking(False)
+            self._add_client(client_socket, client_address)
+        except Exception as e:
+            self.logger.error(f"Error accepting connection: {e}")
 
     def _add_client(self, client_socket: socket.socket, client_address: Tuple[str, int]) -> None:
-        with self.clients_lock:
-            self.clients.append((client_socket, client_address))
+        self.clients[client_socket] = client_address
+        self.client_buffers[client_socket] = ""
+        self.selector.register(client_socket, selectors.EVENT_READ, data=client_address)
+        self.logger.info(f"RPC session started with {client_address}")
 
-    def _start_client_handler(self, client_socket: socket.socket, client_address: Tuple[str, int]) -> None:
-        client_thread = threading.Thread(
-            target=self._handle_client,
-            args=(client_socket, client_address),
-            name=f"ClientHandler-{client_address[0]}:{client_address[1]}"
-        )
-        client_thread.daemon = True
-        client_thread.start()
+    def _handle_client_event(self, key: selectors.SelectorKey, mask: int) -> None:
+        client_socket = key.fileobj
+        client_address = key.data
 
-    def _handle_client(self, client_socket: socket.socket, client_address: Tuple[str, int]) -> None:
         try:
-            with client_socket:
-                self.logger.info(f"RPC session started with {client_address}")
-                client_socket.settimeout(RpcServerConfig.SOCKET_TIMEOUT)
-
-                while self.is_running:
-                    try:
-                        message_data = self._receive_message(client_socket)
-                        if not message_data:
-                            self.logger.info(f"Client {client_address} disconnected")
-                            break
-
-                        message = message_data.decode('utf-8')
-                        self.logger.debug(f"Received from {client_address}: {message}")
-
-                        self._process_message(message, client_socket, client_address)
-
-                    except socket.timeout:
-                        continue
-                    except UnicodeDecodeError as e:
-                        self.logger.error(f"Unicode decode error from {client_address}: {e}")
-                        break
-
+            data = client_socket.recv(RpcServerConfig.BUFFER_SIZE)
+            if data:
+                message = data.decode('utf-8')
+                self.logger.debug(f"Received from {client_address}: {message}")
+                self._process_message(message, client_socket, client_address)
+            else:
+                self.logger.info(f"Client {client_address} disconnected")
+                self._remove_client(client_socket, client_address)
+        except UnicodeDecodeError as e:
+            self.logger.error(f"Unicode decode error from {client_address}: {e}")
+            self._remove_client(client_socket, client_address)
         except ConnectionResetError:
             self.logger.info(f"Client {client_address} disconnected unexpectedly")
+            self._remove_client(client_socket, client_address)
         except Exception as e:
             self.logger.error(f"Error handling client {client_address}: {e}")
-        finally:
             self._remove_client(client_socket, client_address)
-
-    def _receive_message(self, client_socket: socket.socket) -> bytes:
-        return client_socket.recv(RpcServerConfig.BUFFER_SIZE)
 
     def _process_message(self, message: str, client_socket: socket.socket, client_address: Tuple[str, int]) -> None:
         message_type = self._detect_message_type(message)
@@ -178,13 +168,13 @@ class RpcServer:
         self._send_json_response(client_socket, error_response)
 
     def broadcast_message(self, message: str, sender_socket: Optional[socket.socket] = None):
-        with self.clients_lock:
-            for client_socket, client_address in self.clients[:]:
-                if client_socket != sender_socket:
-                    try:
-                        client_socket.sendall(message.encode('utf-8'))
-                    except:
-                        self._remove_client(client_socket, client_address)
+        for client_socket, client_address in list(self.clients.items()):
+            if client_socket != sender_socket:
+                try:
+                    client_socket.sendall(message.encode('utf-8'))
+                except Exception as e:
+                    self.logger.error(f"Error broadcasting to {client_address}: {e}")
+                    self._remove_client(client_socket, client_address)
 
     def send_to_client(self, client_socket: socket.socket, message: str) -> None:
         try:
@@ -202,45 +192,58 @@ class RpcServer:
     def broadcast_json_message(self, data: Dict[str, Any], sender_socket: Optional[socket.socket] = None) -> None:
         try:
             json_str = json.dumps(data)
-            with self.clients_lock:
-                for client_socket, client_address in self.clients[:]:
-                    if client_socket != sender_socket:
-                        try:
-                            client_socket.sendall(json_str.encode('utf-8'))
-                        except Exception as e:
-                            self.logger.error(f"Error broadcasting to {client_address}: {e}")
-                            self._remove_client(client_socket, client_address)
+            for client_socket, client_address in list(self.clients.items()):
+                if client_socket != sender_socket:
+                    try:
+                        client_socket.sendall(json_str.encode('utf-8'))
+                    except Exception as e:
+                        self.logger.error(f"Error broadcasting to {client_address}: {e}")
+                        self._remove_client(client_socket, client_address)
         except json.JSONEncodeError as e:
             self.logger.error(f"Error encoding JSON for broadcast: {e}")
 
     def _remove_client(self, client_socket: socket.socket, client_address: Tuple[str, int]):
-        with self.clients_lock:
-            try:
-                self.clients.remove((client_socket, client_address))
-                client_socket.close()
-                print(f"Removed client {client_address}")
-            except ValueError:
-                pass
+        try:
+            self.selector.unregister(client_socket)
+        except Exception:
+            pass
+
+        try:
+            client_socket.close()
+        except Exception:
+            pass
+
+        if client_socket in self.clients:
+            del self.clients[client_socket]
+
+        if client_socket in self.client_buffers:
+            del self.client_buffers[client_socket]
+
+        print(f"Removed client {client_address}")
 
     def get_connected_clients(self) -> List[Tuple[str, int]]:
-        with self.clients_lock:
-            return [client_address for _, client_address in self.clients]
+        return list(self.clients.values())
 
     def stop_server(self) -> None:
         print("\nShutting down RPC server...")
         self.is_running = False
-        if self.socket:
-            self.socket.close()
 
     def _cleanup(self) -> None:
-        with self.clients_lock:
-            for client_socket, _ in self.clients:
-                try:
-                    client_socket.close()
-                except Exception as e:
-                    self.logger.error(f"Error closing client socket: {e}")
-            self.clients.clear()
+        for client_socket in list(self.clients.keys()):
+            try:
+                client_socket.close()
+            except Exception as e:
+                self.logger.error(f"Error closing client socket: {e}")
+
+        self.clients.clear()
+        self.client_buffers.clear()
+
+        try:
+            self.selector.close()
+        except Exception as e:
+            self.logger.error(f"Error closing selector: {e}")
 
         if self.socket:
             self.socket.close()
+
         self.logger.info("RPC Server cleanup completed")

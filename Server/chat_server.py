@@ -6,13 +6,27 @@ from constants import ChatServerConfig, Messages, ValidationRules
 
 
 class ChatServer:
+    GENERAL_GROUP = "General"  # Default group name
+
     def __init__(self, rpc_server: RpcServer):
         self.rpc_server = rpc_server
         self.user_names: Dict[Tuple[str, int], str] = {}
         self.groups: Dict[str, Dict[str, Any]] = {}  # group_name -> {members: set, creator: str}
         self.user_current_group: Dict[Tuple[str, int], str] = {}  # client_address -> group_name
         self.logger = logging.getLogger(f"{self.__class__.__name__}")
+        self._create_general_group()
         self._register_handlers()
+        # Set disconnect callback
+        self.rpc_server.disconnect_callback = self._handle_client_disconnect
+
+    def _create_general_group(self):
+        """Create the default General group"""
+        self.groups[self.GENERAL_GROUP] = {
+            'members': set(),
+            'creator': 'SYSTEM',
+            'name': self.GENERAL_GROUP
+        }
+        self.logger.info(f"Created default group: {self.GENERAL_GROUP}")
 
     def _register_handlers(self):
         self.rpc_server.register_handler('join_chat', self._handle_join_chat)
@@ -44,15 +58,28 @@ class ChatServer:
             }
 
         self.user_names[client_address] = username
+
+        # Auto-join user to General group
+        self.groups[self.GENERAL_GROUP]['members'].add(client_address)
+        self.user_current_group[client_address] = self.GENERAL_GROUP
+
         self._broadcast_join_message(username, client_socket)
         self._send_welcome_message(username, client_socket)
 
-        self.logger.info(f"{username} ({client_address}) joined the chat")
+        self.logger.info(f"{username} ({client_address}) joined the chat and General group")
+
+        # Get member list for General group
+        members = [self._get_username(addr) for addr in self.groups[self.GENERAL_GROUP]['members']]
+
+        # Broadcast updated members list to all General group members
+        self._broadcast_members_update(self.GENERAL_GROUP)
 
         return {
             'status': 'success',
             'message': f'Joined chat as {username}',
-            'users': list(self.user_names.values())
+            'users': list(self.user_names.values()),
+            'group_name': self.GENERAL_GROUP,
+            'members': members
         }
 
     def _validate_and_get_username(self, params: Dict[str, Any], client_address: Tuple[str, int]) -> str:
@@ -96,6 +123,40 @@ class ChatServer:
         if client_address in self.user_names:
             del self.user_names[client_address]
 
+    def _handle_client_disconnect(self, client_socket: socket.socket, client_address: Tuple[str, int]) -> None:
+        """Handle client disconnect - cleanup user data and notify others"""
+        username = self._get_username(client_address)
+
+        # Remove from current group
+        current_group = self.user_current_group.get(client_address)
+        if current_group and current_group in self.groups:
+            self.groups[current_group]['members'].discard(client_address)
+
+            # Notify group members
+            leave_data = {
+                'type': 'system',
+                'message': f"{username} has left the chat!",
+                'username': 'SYSTEM',
+                'group_name': current_group
+            }
+            self._broadcast_to_group(current_group, leave_data, None)
+
+            # Broadcast updated members list to remaining members
+            self._broadcast_members_update(current_group)
+
+            # Delete group if empty (but not General)
+            if len(self.groups[current_group]['members']) == 0 and current_group != self.GENERAL_GROUP:
+                del self.groups[current_group]
+                self.logger.info(f"Group {current_group} deleted (empty)")
+
+        # Remove user data
+        if client_address in self.user_names:
+            del self.user_names[client_address]
+        if client_address in self.user_current_group:
+            del self.user_current_group[client_address]
+
+        self.logger.info(f"{username} ({client_address}) disconnected and cleaned up")
+
     def _broadcast_leave_message(self, username: str, client_socket: socket.socket) -> None:
         leave_data = {
             'type': 'system',
@@ -117,7 +178,7 @@ class ChatServer:
         self.logger.info(f"JSON RPC message from {client_address} ({username}): {message.strip()}")
 
         chat_data = {
-            'type': 'chat',
+            'type': 'message',
             'message': message.strip(),
             'username': username
         }
@@ -125,9 +186,9 @@ class ChatServer:
         # Check if user is in a group
         current_group = self.user_current_group.get(client_address)
         if current_group:
-            # Broadcast only to group members
-            chat_data['group'] = current_group
-            self._broadcast_to_group(current_group, chat_data, client_socket)
+            # Broadcast to all group members (excluding sender)
+            chat_data['group_name'] = current_group  # Use 'group_name' for filtering
+            self._broadcast_to_group(current_group, chat_data, client_socket)  # Exclude sender
         else:
             # Broadcast to all users not in groups
             self.rpc_server.broadcast_json_message(chat_data, client_socket)
@@ -269,20 +330,52 @@ class ChatServer:
             }
             self._broadcast_to_group(current_group, leave_data, None)
 
-            # Delete group if empty
-            if len(self.groups[current_group]['members']) == 0:
+            # Broadcast updated members list to remaining members
+            self._broadcast_members_update(current_group)
+
+            # Delete group if empty (but not General group)
+            if len(self.groups[current_group]['members']) == 0 and current_group != self.GENERAL_GROUP:
                 del self.groups[current_group]
                 self.logger.info(f"Group {current_group} deleted (empty)")
 
-        # Remove user's group association
-        del self.user_current_group[client_address]
+        # If leaving a non-General group, rejoin General group
+        if current_group != self.GENERAL_GROUP:
+            # Add user back to General group
+            self.groups[self.GENERAL_GROUP]['members'].add(client_address)
+            self.user_current_group[client_address] = self.GENERAL_GROUP
 
-        self.logger.info(f"{username} left group {current_group}")
+            # Notify General group members
+            join_data = {
+                'type': 'system',
+                'message': f"{username} joined the group",
+                'username': 'SYSTEM',
+                'group_name': self.GENERAL_GROUP
+            }
+            self._broadcast_to_group(self.GENERAL_GROUP, join_data, None)
 
-        return {
-            'status': 'success',
-            'message': 'Left group successfully'
-        }
+            # Broadcast updated members list to General group
+            self._broadcast_members_update(self.GENERAL_GROUP)
+
+            self.logger.info(f"{username} left group {current_group} and rejoined {self.GENERAL_GROUP}")
+
+            # Get General group members
+            members = [self._get_username(addr) for addr in self.groups[self.GENERAL_GROUP]['members']]
+
+            return {
+                'status': 'success',
+                'message': 'Left group and rejoined General',
+                'group_name': self.GENERAL_GROUP,
+                'members': members
+            }
+        else:
+            # Leaving General group (shouldn't happen normally)
+            del self.user_current_group[client_address]
+            self.logger.info(f"{username} left group {current_group}")
+
+            return {
+                'status': 'success',
+                'message': 'Left group successfully'
+            }
 
     def _handle_get_group_members(self, params: Dict[str, Any], client_socket: socket.socket, client_address: Tuple[str, int]) -> Dict[str, Any]:
         """Get members of current group"""
@@ -332,3 +425,20 @@ class ChatServer:
                         self.rpc_server.send_json_to_client(client_socket, data)
                     except Exception as e:
                         self.logger.error(f"Error broadcasting to {member_address}: {e}")
+
+    def _broadcast_members_update(self, group_name: str):
+        """Broadcast updated members list to all members of a group"""
+        if group_name not in self.groups:
+            return
+
+        # Get current members list
+        members = [self._get_username(addr) for addr in self.groups[group_name]['members']]
+
+        # Broadcast to all members
+        members_data = {
+            'type': 'members_update',
+            'group_name': group_name,
+            'members': members,
+            'count': len(members)
+        }
+        self._broadcast_to_group(group_name, members_data, None)

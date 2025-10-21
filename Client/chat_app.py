@@ -520,13 +520,491 @@ class LobbyWindow:
         self.window.mainloop()
 
 
-class ChatWindow:
-    """Main chat window for group chat"""
-    def __init__(self, username, client, group_name, members, lobby_window):
+class GeneralChatWindow:
+    """Main chat window for General group (uses Tk as main window)"""
+
+    def __init__(self, username, client, group_name, members):
         self.username = username
         self.client = client
         self.group_name = group_name
-        self.lobby_window = lobby_window
+        self.is_active = True
+        self.refresh_job = None
+        self.other_chat_window = None  # Track other group chat windows
+
+        # Create main window (Tk instead of Toplevel)
+        self.window = tk.Tk()
+        self.window.title(f"User: {username}")
+        self.window.geometry("1000x650")
+        self.window.configure(bg="#F0F0F0")
+
+        # Center window
+        self.window.update_idletasks()
+        width = self.window.winfo_width()
+        height = self.window.winfo_height()
+        x = (self.window.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.window.winfo_screenheight() // 2) - (height // 2)
+        self.window.geometry(f'{width}x{height}+{x}+{y}')
+
+        # Set message handler
+        self.client.message_handler = self._handle_message
+
+        # Setup UI
+        self._setup_ui()
+
+        # Update members list
+        self._update_members_list(members)
+
+        # Start auto-refresh
+        self._auto_refresh_members()
+
+        # Start message processing
+        self.window.after(100, self._process_messages)
+
+        # Handle window close
+        self.window.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _setup_ui(self):
+        """Setup the UI components"""
+        # Main container
+        main_frame = tk.Frame(self.window, bg="#F0F0F0")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Left panel - Group actions and members
+        left_panel = tk.Frame(main_frame, bg="#FFFFFF", relief=tk.SOLID, bd=1, width=200)
+        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
+        left_panel.pack_propagate(False)
+
+        # Group actions header
+        actions_header = tk.Frame(left_panel, bg="#4A90E2")
+        actions_header.pack(fill=tk.X)
+
+        tk.Label(
+            actions_header,
+            text="🏠 Groups",
+            font=("Segoe UI", 11, "bold"),
+            bg="#4A90E2",
+            fg="white"
+        ).pack(pady=8)
+
+        # Create Group button
+        create_btn = tk.Button(
+            left_panel,
+            text="➕ Create Group",
+            font=("Segoe UI", 10),
+            bg="#5CB85C",
+            fg="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=self._create_group
+        )
+        create_btn.pack(fill=tk.X, padx=10, pady=(10, 5))
+
+        # Join Group button
+        join_btn = tk.Button(
+            left_panel,
+            text="🚪 Join Group",
+            font=("Segoe UI", 10),
+            bg="#5BC0DE",
+            fg="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=self._join_group
+        )
+        join_btn.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        # Separator
+        tk.Frame(left_panel, bg="#E0E0E0", height=1).pack(fill=tk.X, padx=5, pady=5)
+
+        # Members header
+        members_header = tk.Frame(left_panel, bg="#4A90E2")
+        members_header.pack(fill=tk.X)
+
+        tk.Label(
+            members_header,
+            text="👥 Members",
+            font=("Segoe UI", 11, "bold"),
+            bg="#4A90E2",
+            fg="white"
+        ).pack(pady=8)
+
+        # Members list
+        members_frame = tk.Frame(left_panel, bg="#FFFFFF")
+        members_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        self.members_listbox = tk.Listbox(
+            members_frame,
+            font=("Segoe UI", 10),
+            bg="#FFFFFF",
+            fg="#333333",
+            selectbackground="#E3F2FD",
+            relief=tk.FLAT,
+            highlightthickness=0
+        )
+        self.members_listbox.pack(fill=tk.BOTH, expand=True)
+
+        # Right panel - Chat area
+        self._setup_chat_panel(main_frame)
+
+    def _setup_chat_panel(self, parent):
+        """Setup the chat panel on the right"""
+        right_panel = tk.Frame(parent, bg="#FFFFFF", relief=tk.SOLID, bd=1)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        # Chat header
+        header_frame = tk.Frame(right_panel, bg="#FFFFFF", relief=tk.SOLID, bd=1)
+        header_frame.pack(fill=tk.X, pady=(0, 5))
+
+        tk.Label(
+            header_frame,
+            text=f"💬 Chat - {self.group_name}",
+            font=("Segoe UI", 12, "bold"),
+            bg="#FFFFFF",
+            fg="#333333"
+        ).pack(pady=10)
+
+        # Chat display area
+        chat_frame = tk.Frame(right_panel, bg="#F5F5F5")
+        chat_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        # Scrollbar
+        scrollbar = tk.Scrollbar(chat_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Chat text widget
+        self.chat_display = tk.Text(
+            chat_frame,
+            font=("Segoe UI", 10),
+            bg="#F5F5F5",
+            fg="#333333",
+            wrap=tk.WORD,
+            state=tk.DISABLED,
+            yscrollcommand=scrollbar.set,
+            relief=tk.FLAT,
+            padx=10,
+            pady=10
+        )
+        self.chat_display.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.chat_display.yview)
+
+        # Configure tags for chat bubbles
+        self.chat_display.tag_config("self", justify=tk.RIGHT, foreground="#FFFFFF", background="#4A90E2", spacing1=5, spacing3=5, lmargin1=100, lmargin2=100, rmargin=10)
+        self.chat_display.tag_config("other", justify=tk.LEFT, foreground="#333333", background="#E8E8E8", spacing1=5, spacing3=5, lmargin1=10, lmargin2=10, rmargin=100)
+        self.chat_display.tag_config("system", justify=tk.CENTER, foreground="#888888", font=("Segoe UI", 9, "italic"), spacing1=5, spacing3=5)
+
+        # Configure username tags
+        self.chat_display.tag_config("username_self", justify=tk.RIGHT, foreground="#666666", font=("Segoe UI", 8), spacing1=2)
+        self.chat_display.tag_config("username_other", justify=tk.LEFT, foreground="#666666", font=("Segoe UI", 8), spacing1=2)
+
+        # Message input area
+        input_frame = tk.Frame(right_panel, bg="#FFFFFF")
+        input_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        # Message entry
+        self.message_entry = tk.Entry(
+            input_frame,
+            font=("Segoe UI", 11),
+            bg="#FFFFFF",
+            fg="#333333",
+            relief=tk.SOLID,
+            bd=1
+        )
+        self.message_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8, padx=(0, 5))
+        self.message_entry.bind('<Return>', lambda e: self._send_message())
+        self.message_entry.focus_set()
+
+        # Send button
+        send_btn = tk.Button(
+            input_frame,
+            text="Send",
+            font=("Segoe UI", 10, "bold"),
+            bg="#4A90E2",
+            fg="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=self._send_message,
+            width=10
+        )
+        send_btn.pack(side=tk.RIGHT, ipady=8)
+
+    # Copy all other methods from ChatWindow
+    def _create_group(self):
+        """Show dialog to create a new group"""
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Create Group")
+        dialog.geometry("400x150")
+        dialog.configure(bg="#F0F0F0")
+        dialog.transient(self.window)
+        dialog.grab_set()
+
+        # Center dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (200)
+        y = (dialog.winfo_screenheight() // 2) - (75)
+        dialog.geometry(f'400x150+{x}+{y}')
+
+        # Label
+        tk.Label(
+            dialog,
+            text="Enter Group Name:",
+            font=("Segoe UI", 11),
+            bg="#F0F0F0"
+        ).pack(pady=(20, 5))
+
+        # Entry
+        entry = tk.Entry(
+            dialog,
+            font=("Segoe UI", 11),
+            width=30
+        )
+        entry.pack(pady=5, padx=20)
+        entry.focus_set()
+
+        # Hint
+        tk.Label(
+            dialog,
+            text="(Leave empty for auto-generated name)",
+            font=("Segoe UI", 9),
+            fg="#888888",
+            bg="#F0F0F0"
+        ).pack()
+
+        def on_create():
+            group_name = entry.get().strip()
+            self.client.create_group(group_name)
+            dialog.destroy()
+
+        # Buttons frame
+        btn_frame = tk.Frame(dialog, bg="#F0F0F0")
+        btn_frame.pack(pady=10)
+
+        tk.Button(
+            btn_frame,
+            text="Create",
+            font=("Segoe UI", 10),
+            bg="#5CB85C",
+            fg="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=on_create,
+            width=10
+        ).pack(side=tk.LEFT, padx=5)
+
+        tk.Button(
+            btn_frame,
+            text="Cancel",
+            font=("Segoe UI", 10),
+            bg="#D9534F",
+            fg="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=dialog.destroy,
+            width=10
+        ).pack(side=tk.LEFT, padx=5)
+
+        entry.bind('<Return>', lambda e: on_create())
+
+    def _join_group(self):
+        """Show dialog to join an existing group"""
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Join Group")
+        dialog.geometry("400x150")
+        dialog.configure(bg="#F0F0F0")
+        dialog.transient(self.window)
+        dialog.grab_set()
+
+        # Center dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (200)
+        y = (dialog.winfo_screenheight() // 2) - (75)
+        dialog.geometry(f'400x150+{x}+{y}')
+
+        # Label
+        tk.Label(
+            dialog,
+            text="Enter Group Name to Join:",
+            font=("Segoe UI", 11),
+            bg="#F0F0F0"
+        ).pack(pady=(20, 10))
+
+        # Entry
+        entry = tk.Entry(
+            dialog,
+            font=("Segoe UI", 11),
+            width=30
+        )
+        entry.pack(pady=10, padx=20)
+        entry.focus_set()
+
+        def on_join():
+            group_name = entry.get().strip()
+            if group_name:
+                self.client.join_group(group_name)
+                dialog.destroy()
+
+        # Buttons frame
+        btn_frame = tk.Frame(dialog, bg="#F0F0F0")
+        btn_frame.pack(pady=10)
+
+        tk.Button(
+            btn_frame,
+            text="Join",
+            font=("Segoe UI", 10),
+            bg="#5BC0DE",
+            fg="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=on_join,
+            width=10
+        ).pack(side=tk.LEFT, padx=5)
+
+        tk.Button(
+            btn_frame,
+            text="Cancel",
+            font=("Segoe UI", 10),
+            bg="#D9534F",
+            fg="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=dialog.destroy,
+            width=10
+        ).pack(side=tk.LEFT, padx=5)
+
+        entry.bind('<Return>', lambda e: on_join())
+
+    def _send_message(self):
+        """Send a message"""
+        message = self.message_entry.get().strip()
+        if message:
+            # Display own message immediately
+            self.chat_display.config(state=tk.NORMAL)
+            self.chat_display.insert(tk.END, "You\n", "username_self")
+            self.chat_display.insert(tk.END, f"{message}\n", "self")
+            self.chat_display.config(state=tk.DISABLED)
+            self.chat_display.see(tk.END)
+
+            # Send to server
+            self.client.send_message(message)
+            self.message_entry.delete(0, tk.END)
+
+    def _update_members_list(self, members):
+        """Update the members list"""
+        self.members_listbox.delete(0, tk.END)
+        for member in members:
+            prefix = "👤 " if member != self.username else "👤 (You) "
+            self.members_listbox.insert(tk.END, f"{prefix}{member}")
+
+    def _auto_refresh_members(self):
+        """Auto-refresh members list every 3 seconds"""
+        if not self.is_active:
+            return
+
+        self.client.get_group_members()
+        self.refresh_job = self.window.after(3000, self._auto_refresh_members)
+
+    def _process_messages(self):
+        """Process messages from queue"""
+        if not self.is_active:
+            return
+
+        try:
+            while True:
+                json_data = self.client.message_queue.get_nowait()
+                # Only process if this window's handler is active
+                if self.client.message_handler == self._handle_message:
+                    self._handle_message(json_data)
+        except queue.Empty:
+            pass
+        finally:
+            if self.client.is_connected and self.is_active:
+                self.window.after(100, self._process_messages)
+
+    def _handle_message(self, json_data):
+        """Handle incoming messages"""
+        # Handle group creation/join - open new ChatWindow
+        if 'status' in json_data and json_data['status'] == 'success':
+            if 'group_name' in json_data:
+                group_name = json_data['group_name']
+                # Only open new window if it's not the General group
+                if group_name != self.group_name:
+                    members = json_data.get('members', [])
+                    # Close previous other chat window if exists
+                    if self.other_chat_window:
+                        try:
+                            self.other_chat_window.window.destroy()
+                        except:
+                            pass
+                    # Hide General window
+                    self.window.withdraw()
+                    # Open new chat window for other group
+                    self.other_chat_window = ChatWindow(self.username, self.client, group_name, members, self)
+                    return
+
+            # Handle members list update
+            if 'members' in json_data and 'group_name' not in json_data:
+                members = json_data['members']
+                self._update_members_list(members)
+                return
+
+        # Handle members update
+        if 'type' in json_data and json_data['type'] == 'members_update':
+            message_group = json_data.get('group_name', None)
+            # Only update if it's for this group
+            if message_group == self.group_name:
+                members = json_data.get('members', [])
+                self._update_members_list(members)
+            return
+
+        # Handle chat messages
+        if 'type' in json_data:
+            msg_type = json_data['type']
+            username = json_data.get('username', 'Unknown')
+            message = json_data.get('message', '')
+            message_group = json_data.get('group_name', None)  # Changed from 'group' to 'group_name'
+
+            # Filter: Only show messages from this group
+            if msg_type == 'message' and message_group != self.group_name:
+                return  # Ignore messages from other groups
+
+            self.chat_display.config(state=tk.NORMAL)
+
+            if msg_type == 'system':
+                self.chat_display.insert(tk.END, f"{message}\n", "system")
+            elif msg_type == 'message':
+                # Only show messages from others (sender already displayed their own)
+                if username != self.username:
+                    # Show username label
+                    self.chat_display.insert(tk.END, f"{username}\n", "username_other")
+                    # Show message
+                    self.chat_display.insert(tk.END, f"{message}\n", "other")
+
+            self.chat_display.config(state=tk.DISABLED)
+            self.chat_display.see(tk.END)
+
+    def show(self):
+        """Show the window again"""
+        self.client.message_handler = self._handle_message
+        self.window.deiconify()
+        self.client.get_group_members()
+
+    def _on_close(self):
+        """Handle window close"""
+        self.is_active = False
+        if self.refresh_job:
+            self.window.after_cancel(self.refresh_job)
+        self.client.disconnect()
+        self.window.destroy()
+
+    def run(self):
+        self.window.mainloop()
+
+
+class ChatWindow:
+    """Chat window for other groups (Toplevel)"""
+    def __init__(self, username, client, group_name, members, parent_window):
+        self.username = username
+        self.client = client
+        self.group_name = group_name
+        self.parent_window = parent_window  # Can be GeneralChatWindow or LobbyWindow
         self.is_active = True  # Flag to track if window is active
         self.refresh_job = None  # Store refresh job ID
 
@@ -571,8 +1049,8 @@ class ChatWindow:
         # Back button
         tk.Button(
             left_panel,
-            text="⬅ Back to Lobby",
-            command=self._back_to_lobby,
+            text="⬅ Back to General",
+            command=self._back_to_parent,
             bg="#E74C3C",
             fg="#FFFFFF",
             font=("Segoe UI", 10, "bold"),
@@ -712,8 +1190,8 @@ class ChatWindow:
         self.message_entry.delete(0, tk.END)
         self.message_entry.focus_set()
 
-    def _back_to_lobby(self):
-        """Leave group and go back to lobby"""
+    def _back_to_parent(self):
+        """Leave group and go back to parent window"""
         # Stop auto refresh
         self.is_active = False
         if self.refresh_job:
@@ -722,12 +1200,12 @@ class ChatWindow:
         # Leave group
         self.client.leave_group()
 
-        # Set message handler back to lobby
-        self.client.message_handler = self.lobby_window._handle_message
+        # Set message handler back to parent
+        self.client.message_handler = self.parent_window._handle_message
 
-        # Destroy window and show lobby
+        # Destroy window and show parent
         self.window.destroy()
-        self.lobby_window.show()
+        self.parent_window.show()
 
     def _auto_refresh_members(self):
         """Auto refresh group members every 3 seconds"""
@@ -806,17 +1284,29 @@ class ChatWindow:
         # Handle broadcast messages
         elif 'type' in json_data:
             msg_type = json_data['type']
+            message_group = json_data.get('group_name', None)
+
+            # Handle members update
+            if msg_type == 'members_update':
+                # Only update if it's for this group
+                if message_group == self.group_name:
+                    members = json_data.get('members', [])
+                    self._update_users_list(members)
+                return
+
             message = json_data.get('message', '')
             username = json_data.get('username', 'Unknown')
 
-            if msg_type == 'chat':
-                # Don't display own message again (already displayed when sent)
+            # Filter: Only show messages from this group
+            if msg_type == 'message' and message_group != self.group_name:
+                return  # Ignore messages from other groups
+
+            if msg_type == 'message':
+                # Only display messages from others (sender already displayed their own)
                 if username != self.username:
                     self._add_chat_message(username, message)
             elif msg_type == 'system':
                 self._add_system_message(message)
-            else:
-                self._add_system_message(f"[{msg_type}] {username}: {message}")
 
         # Handle errors
         elif 'error' in json_data:
@@ -833,12 +1323,12 @@ class ChatWindow:
         # Leave group
         self.client.leave_group()
 
-        # Set message handler back to lobby
-        self.client.message_handler = self.lobby_window._handle_message
+        # Set message handler back to parent
+        self.client.message_handler = self.parent_window._handle_message
 
-        # Destroy window and show lobby
+        # Destroy window and show parent
         self.window.destroy()
-        self.lobby_window.show()
+        self.parent_window.show()
 
 
 def main():
@@ -859,9 +1349,25 @@ def main():
         listen_thread = threading.Thread(target=client.listen_for_messages, daemon=True)
         listen_thread.start()
 
-        # Show lobby window
-        lobby_window = LobbyWindow(username, client)
-        lobby_window.run()
+        # Wait for join_chat response with General group info
+        try:
+            response = client.message_queue.get(timeout=5)
+
+            # Skip system messages and members_update, get the actual join response
+            while response.get('type') in ['system', 'members_update']:
+                response = client.message_queue.get(timeout=5)
+
+            if response.get('status') == 'success' and 'group_name' in response:
+                group_name = response['group_name']
+                members = response.get('members', [])
+
+                # Create main window (Tk) as ChatWindow for General group
+                main_window = GeneralChatWindow(username, client, group_name, members)
+                main_window.run()
+            else:
+                messagebox.showerror("Error", "Failed to join General group")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to initialize: {str(e)}")
 
     login_window = LoginWindow(on_login)
     login_window.run()

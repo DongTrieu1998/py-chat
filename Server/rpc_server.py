@@ -19,6 +19,7 @@ class RpcServer:
         self.clients: Dict[socket.socket, Tuple[str, int]] = {}
         self.client_buffers: Dict[socket.socket, str] = {}
         self.message_handlers: Dict[str, Callable] = {}
+        self.disconnect_callback: Optional[Callable] = None  # Callback when client disconnects
         self._setup_logging()
 
     def _setup_logging(self) -> None:
@@ -203,6 +204,13 @@ class RpcServer:
             self.logger.error(f"Error encoding JSON for broadcast: {e}")
 
     def _remove_client(self, client_socket: socket.socket, client_address: Tuple[str, int]):
+        # Call disconnect callback before cleanup
+        if self.disconnect_callback:
+            try:
+                self.disconnect_callback(client_socket, client_address)
+            except Exception as e:
+                self.logger.error(f"Error in disconnect callback: {e}")
+
         try:
             self.selector.unregister(client_socket)
         except Exception:

@@ -9,6 +9,8 @@ class ChatServer:
     def __init__(self, rpc_server: RpcServer):
         self.rpc_server = rpc_server
         self.user_names: Dict[Tuple[str, int], str] = {}
+        self.groups: Dict[str, Dict[str, Any]] = {}  # group_name -> {members: set, creator: str}
+        self.user_current_group: Dict[Tuple[str, int], str] = {}  # client_address -> group_name
         self.logger = logging.getLogger(f"{self.__class__.__name__}")
         self._register_handlers()
 
@@ -17,6 +19,11 @@ class ChatServer:
         self.rpc_server.register_handler('leave_chat', self._handle_leave_chat)
         self.rpc_server.register_handler('send_message', self._handle_send_message)
         self.rpc_server.register_handler('get_users', self._handle_get_users)
+        self.rpc_server.register_handler('create_group', self._handle_create_group)
+        self.rpc_server.register_handler('join_group', self._handle_join_group)
+        self.rpc_server.register_handler('leave_group', self._handle_leave_group)
+        self.rpc_server.register_handler('get_group_members', self._handle_get_group_members)
+        self.rpc_server.register_handler('get_groups', self._handle_get_groups)
 
     def _validate_message(self, message: str) -> bool:
         return ValidationRules.is_valid_message(message)
@@ -114,7 +121,16 @@ class ChatServer:
             'message': message.strip(),
             'username': username
         }
-        self.rpc_server.broadcast_json_message(chat_data, client_socket)
+
+        # Check if user is in a group
+        current_group = self.user_current_group.get(client_address)
+        if current_group:
+            # Broadcast only to group members
+            chat_data['group'] = current_group
+            self._broadcast_to_group(current_group, chat_data, client_socket)
+        else:
+            # Broadcast to all users not in groups
+            self.rpc_server.broadcast_json_message(chat_data, client_socket)
 
         return {
             'status': 'success',
@@ -154,3 +170,165 @@ class ChatServer:
 
     def get_user_count(self):
         return len(self.user_names)
+
+    def _handle_create_group(self, params: Dict[str, Any], client_socket: socket.socket, client_address: Tuple[str, int]) -> Dict[str, Any]:
+        """Create a new group chat"""
+        username = self._get_username(client_address)
+
+        # Get group name from params or generate one
+        group_name = params.get('group_name', '').strip()
+
+        if not group_name:
+            # Generate unique group name if not provided
+            import time
+            group_name = f"Group_{int(time.time())}"
+
+        # Check if group name already exists
+        if group_name in self.groups:
+            return {
+                'status': 'error',
+                'message': f'Group name "{group_name}" already exists'
+            }
+
+        # Create group
+        self.groups[group_name] = {
+            'members': {client_address},
+            'creator': username,
+            'name': group_name
+        }
+
+        # Add user to group
+        self.user_current_group[client_address] = group_name
+
+        self.logger.info(f"{username} created group {group_name}")
+
+        return {
+            'status': 'success',
+            'message': f'Group created: {group_name}',
+            'group_name': group_name,
+            'members': [username]
+        }
+
+    def _handle_join_group(self, params: Dict[str, Any], client_socket: socket.socket, client_address: Tuple[str, int]) -> Dict[str, Any]:
+        """Join an existing group"""
+        group_name = params.get('group_name', '')
+        username = self._get_username(client_address)
+
+        if not group_name or group_name not in self.groups:
+            return {
+                'status': 'error',
+                'message': 'Group not found'
+            }
+
+        # Add user to group
+        self.groups[group_name]['members'].add(client_address)
+        self.user_current_group[client_address] = group_name
+
+        # Notify group members
+        join_data = {
+            'type': 'system',
+            'message': f"{username} joined the group",
+            'username': 'SYSTEM',
+            'group': group_name
+        }
+        self._broadcast_to_group(group_name, join_data, None)
+
+        # Get member list
+        members = [self._get_username(addr) for addr in self.groups[group_name]['members']]
+
+        self.logger.info(f"{username} joined group {group_name}")
+
+        return {
+            'status': 'success',
+            'message': f'Joined group: {group_name}',
+            'group_name': group_name,
+            'members': members
+        }
+
+    def _handle_leave_group(self, params: Dict[str, Any], client_socket: socket.socket, client_address: Tuple[str, int]) -> Dict[str, Any]:
+        """Leave current group"""
+        username = self._get_username(client_address)
+        current_group = self.user_current_group.get(client_address)
+
+        if not current_group:
+            return {
+                'status': 'error',
+                'message': 'Not in any group'
+            }
+
+        # Remove user from group
+        if current_group in self.groups:
+            self.groups[current_group]['members'].discard(client_address)
+
+            # Notify remaining members
+            leave_data = {
+                'type': 'system',
+                'message': f"{username} left the group",
+                'username': 'SYSTEM',
+                'group': current_group
+            }
+            self._broadcast_to_group(current_group, leave_data, None)
+
+            # Delete group if empty
+            if len(self.groups[current_group]['members']) == 0:
+                del self.groups[current_group]
+                self.logger.info(f"Group {current_group} deleted (empty)")
+
+        # Remove user's group association
+        del self.user_current_group[client_address]
+
+        self.logger.info(f"{username} left group {current_group}")
+
+        return {
+            'status': 'success',
+            'message': 'Left group successfully'
+        }
+
+    def _handle_get_group_members(self, params: Dict[str, Any], client_socket: socket.socket, client_address: Tuple[str, int]) -> Dict[str, Any]:
+        """Get members of current group"""
+        current_group = self.user_current_group.get(client_address)
+
+        if not current_group or current_group not in self.groups:
+            return {
+                'status': 'error',
+                'message': 'Not in any group'
+            }
+
+        members = [self._get_username(addr) for addr in self.groups[current_group]['members']]
+
+        return {
+            'status': 'success',
+            'group_name': current_group,
+            'members': members,
+            'count': len(members)
+        }
+
+    def _handle_get_groups(self, params: Dict[str, Any], client_socket: socket.socket, client_address: Tuple[str, int]) -> Dict[str, Any]:
+        """Get list of all groups"""
+        groups_list = []
+        for group_name, group_data in self.groups.items():
+            groups_list.append({
+                'name': group_name,
+                'creator': group_data['creator'],
+                'member_count': len(group_data['members'])
+            })
+
+        return {
+            'status': 'success',
+            'groups': groups_list,
+            'count': len(groups_list)
+        }
+
+    def _broadcast_to_group(self, group_name: str, data: Dict[str, Any], exclude_socket: socket.socket = None):
+        """Broadcast message to all members of a group"""
+        if group_name not in self.groups:
+            return
+
+        for member_address in self.groups[group_name]['members']:
+            # Find the socket for this address
+            for client_socket, addr in self.rpc_server.clients.items():
+                if addr == member_address and client_socket != exclude_socket:
+                    try:
+                        self.rpc_server.send_json_to_client(client_socket, data)
+                    except Exception as e:
+                        self.logger.error(f"Error broadcasting to {member_address}: {e}")

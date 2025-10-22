@@ -246,6 +246,11 @@ class ChatServer:
 
         # Check if group name already exists
         if group_name in self.groups:
+            group_error_data = {
+                'status': 'error',
+                'message': f'Group name "{group_name}" already exists'
+            }
+            self.rpc_server.send_json_to_client(client_socket, group_error_data)
             return {
                 'status': 'error',
                 'message': f'Group name "{group_name}" already exists'

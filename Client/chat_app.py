@@ -802,6 +802,45 @@ class GeneralChatWindow:
         ).pack(side=tk.LEFT, padx=5)
 
         entry.bind('<Return>', lambda e: on_create())
+    
+    def show_error_message_pop_up(self, message):
+        """Show dialog to create a new group"""
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Error")
+        dialog.geometry("180x80")
+        dialog.configure(bg="#F0F0F0")
+        dialog.transient(self.window)
+        dialog.grab_set()
+
+        # Center dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (200)
+        y = (dialog.winfo_screenheight() // 2) - (75)
+        dialog.geometry(f'400x150+{x}+{y}')
+
+        # Label
+        tk.Label(
+            dialog,
+            text=str(message),
+            font=("Segoe UI", 11),
+            bg="#F0F0F0"
+        ).pack(pady=(20, 5))
+
+        # Buttons frame
+        btn_frame = tk.Frame(dialog, bg="#F0F0F0")
+        btn_frame.pack(pady=10)
+
+        tk.Button(
+            btn_frame,
+            text="Close",
+            font=("Segoe UI", 10),
+            bg="#D9534F",
+            fg="white",
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=dialog.destroy,
+            width=10
+        ).pack(side=tk.LEFT, padx=5)
 
     def _join_group(self):
         """Show dialog to join an existing group"""
@@ -921,23 +960,28 @@ class GeneralChatWindow:
     def _handle_message(self, json_data):
         """Handle incoming messages"""
         # Handle group creation/join - open new ChatWindow
-        if 'status' in json_data and json_data['status'] == 'success':
-            if 'group_name' in json_data:
-                group_name = json_data['group_name']
-                # Only open new window if it's not the General group
-                if group_name != self.group_name:
-                    members = json_data.get('members', [])
-                    # Close previous other chat window if exists
-                    if self.other_chat_window:
-                        try:
-                            self.other_chat_window.window.destroy()
-                        except:
-                            pass
-                    # Hide General window
-                    self.window.withdraw()
-                    # Open new chat window for other group
-                    self.other_chat_window = ChatWindow(self.username, self.client, group_name, members, self)
-                    return
+        if 'status' in json_data:
+            if json_data['status'] == 'success':
+                if 'group_name' in json_data:
+                    group_name = json_data['group_name']
+                    # Only open new window if it's not the General group
+                    if group_name != self.group_name:
+                        members = json_data.get('members', [])
+                        # Close previous other chat window if exists
+                        if self.other_chat_window:
+                            try:
+                                self.other_chat_window.window.destroy()
+                            except:
+                                pass
+                        # Hide General window
+                        self.window.withdraw()
+                        # Open new chat window for other group
+                        self.other_chat_window = ChatWindow(self.username, self.client, group_name, members, self)
+                        return
+            elif json_data['status'] == 'error':
+                message = json_data.get('message', 'Unknown error')
+                self.show_error_message_pop_up(message)
+                return
 
             # Handle members list update
             if 'members' in json_data and 'group_name' not in json_data:

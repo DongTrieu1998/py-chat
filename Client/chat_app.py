@@ -258,6 +258,7 @@ class LobbyWindow:
         self.window.geometry(f"600x500+{x}+{y}")
 
         self.chat_window = None
+        self.pending_private_chat = None  # Store pending private chat group name
 
         # Set message handler to this window
         self.client.message_handler = self._handle_message
@@ -339,6 +340,9 @@ class LobbyWindow:
             bd=0
         )
         self.users_listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Bind double click event
+        self.users_listbox.bind('<Double-Button-1>', self._on_user_double_click)
 
     def _create_group(self):
         """Show dialog to create a new group"""
@@ -464,6 +468,35 @@ class LobbyWindow:
             display_name = username + (" (You)" if username == self.username else "")
             self.users_listbox.insert(tk.END, display_name)
 
+    def _on_user_double_click(self, event):
+        """Handle double click on user in the list - Create private chat"""
+        selection = self.users_listbox.curselection()
+        if selection:
+            index = selection[0]
+            selected_user = self.users_listbox.get(index)
+
+            # Remove " (You)" suffix if present
+            selected_user = selected_user.replace(" (You)", "").strip()
+
+            # Don't create chat with yourself
+            if selected_user == self.username:
+                print(f"✗ Cannot create private chat with yourself")
+                return
+
+            print(f"✓ Double clicked on user: {selected_user}")
+
+            # Create a private group name (sorted to ensure consistency)
+            users = sorted([self.username, selected_user])
+            private_group_name = f"private_{users[0]}_{users[1]}"
+
+            print(f"→ Creating/joining private chat: {private_group_name}")
+
+            # Store pending private chat request
+            self.pending_private_chat = private_group_name
+
+            # Try to create the group first (will fail if exists, then join)
+            self.client.create_group(private_group_name)
+
     def _process_messages(self):
         """Process messages from queue"""
         try:
@@ -490,6 +523,9 @@ class LobbyWindow:
                     group_name = json_data['group_name']
                     members = json_data.get('members', [])
 
+                    # Clear pending private chat flag
+                    self.pending_private_chat = None
+
                     # Open chat window for this group
                     self.window.withdraw()  # Hide lobby
                     self.chat_window = ChatWindow(self.username, self.client, group_name, members, self)
@@ -502,7 +538,17 @@ class LobbyWindow:
 
             elif status == 'error':
                 message = json_data.get('message', 'Unknown error')
-                messagebox.showerror("Error", message)
+
+                # Check if this is a failed private chat creation (group already exists)
+                if self.pending_private_chat and 'already exists' in message:
+                    print(f"→ Group already exists, joining instead: {self.pending_private_chat}")
+                    # Try to join the existing group
+                    self.client.join_group(self.pending_private_chat)
+                    # Don't clear pending_private_chat yet, wait for join response
+                else:
+                    # Clear pending flag and show error
+                    self.pending_private_chat = None
+                    messagebox.showerror("Error", message)
 
     def show(self):
         """Show the lobby window again"""
@@ -533,6 +579,7 @@ class GeneralChatWindow:
         self.refresh_job = None
         self.other_chat_window = None  # Track other group chat windows
         self.message_history = message_history or []  # Store initial message history
+        self.pending_private_chat = None  # Store pending private chat group name
 
         # Create main window (Tk instead of Toplevel)
         self.window = tk.Tk()
@@ -648,6 +695,9 @@ class GeneralChatWindow:
             highlightthickness=0
         )
         self.members_listbox.pack(fill=tk.BOTH, expand=True)
+
+        # Bind double click event
+        self.members_listbox.bind('<Double-Button-1>', self._on_member_double_click)
 
         # Right panel - Chat area
         self._setup_chat_panel(main_frame)
@@ -939,6 +989,35 @@ class GeneralChatWindow:
             prefix = "👤 " if member != self.username else "👤 (You) "
             self.members_listbox.insert(tk.END, f"{prefix}{member}")
 
+    def _on_member_double_click(self, event):
+        """Handle double click on member in the list - Create private chat"""
+        selection = self.members_listbox.curselection()
+        if selection:
+            index = selection[0]
+            selected_member = self.members_listbox.get(index)
+
+            # Remove prefix "👤 " and " (You) " if present
+            selected_member = selected_member.replace("👤 ", "").replace("(You) ", "").strip()
+
+            # Don't create chat with yourself
+            if selected_member == self.username:
+                print(f"✗ Cannot create private chat with yourself")
+                return
+
+            print(f"✓ Double clicked on member: {selected_member}")
+
+            # Create a private group name (sorted to ensure consistency)
+            users = sorted([self.username, selected_member])
+            private_group_name = f"private_{users[0]}_{users[1]}"
+
+            print(f"→ Creating/joining private chat: {private_group_name}")
+
+            # Store pending private chat request
+            self.pending_private_chat = private_group_name
+
+            # Try to create the group first
+            self.client.create_group(private_group_name)
+
     def _auto_refresh_members(self):
         """Auto-refresh members list every 3 seconds"""
         if not self.is_active:
@@ -977,6 +1056,9 @@ class GeneralChatWindow:
                         message_history = json_data.get('message_history', [])
                         print(f"[DEBUG] GeneralChatWindow: creating ChatWindow for {group_name} with {len(message_history)} messages")
 
+                        # Clear pending private chat flag
+                        self.pending_private_chat = None
+
                         # Close previous other chat window if exists
                         if self.other_chat_window:
                             try:
@@ -1004,7 +1086,17 @@ class GeneralChatWindow:
                         return
             elif json_data['status'] == 'error':
                 message = json_data.get('message', 'Unknown error')
-                self.show_error_message_pop_up(message)
+
+                # Check if this is a failed private chat creation (group already exists)
+                if self.pending_private_chat and 'already exists' in message:
+                    print(f"→ Group already exists, joining instead: {self.pending_private_chat}")
+                    # Try to join the existing group
+                    self.client.join_group(self.pending_private_chat)
+                    # Don't clear pending_private_chat yet, wait for join response
+                else:
+                    # Clear pending flag and show error
+                    self.pending_private_chat = None
+                    self.show_error_message_pop_up(message)
                 return
 
             # Handle members list update
@@ -1114,6 +1206,7 @@ class ChatWindow:
         self.is_active = True  # Flag to track if window is active
         self.refresh_job = None  # Store refresh job ID
         self.message_history = message_history or []  # Store initial message history
+        self.pending_private_chat = None  # Store pending private chat group name
         print(f"[DEBUG] ChatWindow constructor: received {len(self.message_history)} messages for group {group_name}")
 
         # Create window
@@ -1190,6 +1283,9 @@ class ChatWindow:
             width=20
         )
         self.users_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+
+        # Bind double click event
+        self.users_listbox.bind('<Double-Button-1>', self._on_user_double_click_other_group)
 
         # Right panel - Chat area
         right_panel = tk.Frame(main_container, bg="#F0F0F0")
@@ -1359,6 +1455,35 @@ class ChatWindow:
             display_name = username + (" (You)" if username == self.username else "")
             self.users_listbox.insert(tk.END, display_name)
 
+    def _on_user_double_click_other_group(self, event):
+        """Handle double click on user in the other group list - Create private chat"""
+        selection = self.users_listbox.curselection()
+        if selection:
+            index = selection[0]
+            selected_user = self.users_listbox.get(index)
+
+            # Remove " (You)" suffix if present
+            selected_user = selected_user.replace(" (You)", "").strip()
+
+            # Don't create chat with yourself
+            if selected_user == self.username:
+                print(f"✗ Cannot create private chat with yourself")
+                return
+
+            print(f"✓ Double clicked on user in group '{self.group_name}': {selected_user}")
+
+            # Create a private group name (sorted to ensure consistency)
+            users = sorted([self.username, selected_user])
+            private_group_name = f"private_{users[0]}_{users[1]}"
+
+            print(f"→ Creating/joining private chat: {private_group_name}")
+
+            # Store pending private chat request
+            self.pending_private_chat = private_group_name
+
+            # Try to create the group first
+            self.client.create_group(private_group_name)
+
     def _display_message_history(self, message_history):
         """Display message history from server"""
         print(f"[DEBUG] _display_message_history called with {len(message_history) if message_history else 0} messages")
@@ -1422,23 +1547,61 @@ class ChatWindow:
             message = json_data.get('message', '')
 
             if status == 'success':
-                # Handle group members list and message history
-                if 'members' in json_data and 'group_name' in json_data:
-                    members = json_data['members']
-                    self._update_users_list(members)
+                # Handle group creation/join - switch to new group
+                if 'group_name' in json_data:
+                    group_name = json_data['group_name']
+                    # If it's a different group, switch to it
+                    if group_name != self.group_name:
+                        members = json_data.get('members', [])
+                        message_history = json_data.get('message_history', [])
 
-                    # Display message history if available (for new joins)
-                    message_history = json_data.get('message_history', [])
-                    print(f"[DEBUG] ChatWindow received message_history: {len(message_history) if message_history else 0} messages")
-                    if message_history:
-                        print(f"[DEBUG] First message: {message_history[0] if message_history else 'None'}")
-                        self._display_message_history(message_history)
+                        # Clear pending private chat flag
+                        self.pending_private_chat = None
+
+                        # Leave current group and switch to new one
+                        self.client.leave_group()
+
+                        # Update this window to show the new group
+                        self.group_name = group_name
+                        self.window.title(f"Chat - {group_name}")
+                        self._update_users_list(members)
+
+                        # Clear and display new message history
+                        self.chat_display.config(state=tk.NORMAL)
+                        self.chat_display.delete(1.0, tk.END)
+                        self.chat_display.config(state=tk.DISABLED)
+
+                        if message_history:
+                            self._display_message_history(message_history)
+
+                        self._add_system_message(f"Switched to {group_name}")
+                        return
                     else:
-                        print("[DEBUG] No message history in server response")
+                        # Same group - just update members
+                        members = json_data.get('members', [])
+                        self._update_users_list(members)
+
+                        # Display message history if available (for new joins)
+                        message_history = json_data.get('message_history', [])
+                        print(f"[DEBUG] ChatWindow received message_history: {len(message_history) if message_history else 0} messages")
+                        if message_history:
+                            print(f"[DEBUG] First message: {message_history[0] if message_history else 'None'}")
+                            self._display_message_history(message_history)
+                        else:
+                            print("[DEBUG] No message history in server response")
                 elif message and not message.startswith('Message sent'):
                     self._add_system_message(message)
             elif status == 'error':
-                self._add_system_message(f"Error: {message}")
+                # Check if this is a failed private chat creation (group already exists)
+                if self.pending_private_chat and 'already exists' in message:
+                    print(f"→ Group already exists, joining instead: {self.pending_private_chat}")
+                    # Try to join the existing group
+                    self.client.join_group(self.pending_private_chat)
+                    # Don't clear pending_private_chat yet, wait for join response
+                else:
+                    # Clear pending flag and show error
+                    self.pending_private_chat = None
+                    self._add_system_message(f"Error: {message}")
 
         # Handle broadcast messages
         elif 'type' in json_data:

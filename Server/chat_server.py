@@ -292,12 +292,41 @@ class ChatServer:
             }
 
         # Create group
-        self.groups[group_name] = {
+        group_data = {
             'members': {client_address},
             'creator': username,
             'name': group_name,
             'message_history': []  # Initialize empty message history
         }
+
+        # If this is a private chat, extract and store allowed users
+        if self._is_private_chat(group_name):
+            # Format: private_user1_user2
+            # Extract the two usernames from the group name
+            allowed_users = []
+            remaining = group_name.replace('private_', '', 1)
+
+            # The creator is one of them
+            allowed_users.append(username)
+
+            # The other user is the remaining part after removing creator
+            # Try both possibilities (creator could be first or second)
+            if remaining.startswith(username + '_'):
+                other_user = remaining[len(username) + 1:]
+                if other_user:  # Make sure we got a valid username
+                    allowed_users.append(other_user)
+            elif remaining.endswith('_' + username):
+                other_user = remaining[:-len(username) - 1]
+                if other_user:  # Make sure we got a valid username
+                    allowed_users.append(other_user)
+
+            if len(allowed_users) == 2:
+                group_data['allowed_users'] = allowed_users
+                self.logger.info(f"Created private chat {group_name} for users: {allowed_users}")
+            else:
+                self.logger.warning(f"Could not extract both users from private chat name: {group_name}")
+
+        self.groups[group_name] = group_data
 
         # Add user to group
         self.user_current_group[client_address] = group_name
@@ -311,6 +340,24 @@ class ChatServer:
             'members': [username]
         }
 
+    def _is_private_chat(self, group_name: str) -> bool:
+        """Check if group is a private chat between two users"""
+        return group_name.startswith('private_')
+
+    def _get_private_chat_users(self, group_name: str) -> List[str]:
+        """Extract usernames from private chat group name"""
+        if not self._is_private_chat(group_name):
+            return []
+        # Format: private_user1_user2
+        parts = group_name.split('_', 1)  # Split only at first underscore after 'private'
+        if len(parts) < 2:
+            return []
+        # The rest is "user1_user2", need to split into two usernames
+        users_part = parts[1]
+        # Find the middle underscore by trying to match with existing usernames
+        # For now, we'll store allowed users in group metadata
+        return []
+
     def _handle_join_group(self, params: Dict[str, Any], client_socket: socket.socket, client_address: Tuple[str, int]) -> Dict[str, Any]:
         """Join an existing group"""
         group_name = params.get('group_name', '')
@@ -321,6 +368,17 @@ class ChatServer:
                 'status': 'error',
                 'message': 'Group not found'
             }
+
+        # Check if this is a private chat and user is allowed to join
+        if self._is_private_chat(group_name):
+            # Get allowed users from group metadata
+            allowed_users = self.groups[group_name].get('allowed_users', [])
+            if allowed_users and username not in allowed_users:
+                self.logger.warning(f"{username} attempted to join private chat {group_name} but is not authorized")
+                return {
+                    'status': 'error',
+                    'message': 'This is a private chat. You are not authorized to join.'
+                }
 
         # Add user to group
         self.groups[group_name]['members'].add(client_address)

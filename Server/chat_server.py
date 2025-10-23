@@ -1,5 +1,6 @@
 import socket
 import logging
+import time
 from typing import Tuple, Dict, Any, List
 from rpc_server import RpcServer
 from constants import ChatServerConfig, Messages, ValidationRules
@@ -24,7 +25,8 @@ class ChatServer:
         self.groups[self.GENERAL_GROUP] = {
             'members': set(),
             'creator': 'SYSTEM',
-            'name': self.GENERAL_GROUP
+            'name': self.GENERAL_GROUP,
+            'message_history': []  # List to store message history
         }
         self.logger.info(f"Created default group: {self.GENERAL_GROUP}")
 
@@ -71,6 +73,21 @@ class ChatServer:
         # Get member list for General group
         members = [self._get_username(addr) for addr in self.groups[self.GENERAL_GROUP]['members']]
 
+        # Prepare message history for the new client
+        message_history = []
+        if 'message_history' in self.groups[self.GENERAL_GROUP]:
+            for msg_record in self.groups[self.GENERAL_GROUP]['message_history']:
+                # Convert message record to format client can understand
+                history_msg = {
+                    'type': msg_record['type'],
+                    'message': msg_record['message'],
+                    'username': msg_record['username'],
+                    'timestamp': msg_record['timestamp'],
+                    'is_own_message': msg_record['sender_address'] == client_address,  # Flag to identify own messages
+                    'group_name': self.GENERAL_GROUP
+                }
+                message_history.append(history_msg)
+
         # Broadcast updated members list to all General group members
         self._broadcast_members_update(self.GENERAL_GROUP)
 
@@ -79,7 +96,8 @@ class ChatServer:
             'message': f'Joined chat as {username}',
             'users': list(self.user_names.values()),
             'group_name': self.GENERAL_GROUP,
-            'members': members
+            'members': members,
+            'message_history': message_history  # Include message history
         }
 
     def _validate_and_get_username(self, params: Dict[str, Any], client_address: Tuple[str, int]) -> str:
@@ -186,6 +204,23 @@ class ChatServer:
         # Check if user is in a group
         current_group = self.user_current_group.get(client_address)
         if current_group:
+            # Add message to group history
+            message_record = {
+                'type': 'message',
+                'message': message.strip(),
+                'username': username,
+                'timestamp': time.time(),
+                'sender_address': client_address  # Store sender address for client identification
+            }
+
+            if current_group in self.groups:
+                self.groups[current_group]['message_history'].append(message_record)
+                self.logger.info(f"Added message to {current_group} history. Total: {len(self.groups[current_group]['message_history'])}")
+                # Keep only last 100 messages to prevent memory issues
+                if len(self.groups[current_group]['message_history']) > 100:
+                    self.groups[current_group]['message_history'] = self.groups[current_group]['message_history'][-100:]
+                    self.logger.info(f"Trimmed {current_group} history to 100 messages")
+
             # Broadcast to all group members (excluding sender)
             chat_data['group_name'] = current_group  # Use 'group_name' for filtering
             self._broadcast_to_group(current_group, chat_data, client_socket)  # Exclude sender
@@ -260,7 +295,8 @@ class ChatServer:
         self.groups[group_name] = {
             'members': {client_address},
             'creator': username,
-            'name': group_name
+            'name': group_name,
+            'message_history': []  # Initialize empty message history
         }
 
         # Add user to group
@@ -302,13 +338,32 @@ class ChatServer:
         # Get member list
         members = [self._get_username(addr) for addr in self.groups[group_name]['members']]
 
-        self.logger.info(f"{username} joined group {group_name}")
+        # Prepare message history for the new client
+        message_history = []
+        if 'message_history' in self.groups[group_name]:
+            self.logger.info(f"Group {group_name} has {len(self.groups[group_name]['message_history'])} messages in history")
+            for msg_record in self.groups[group_name]['message_history']:
+                # Convert message record to format client can understand
+                history_msg = {
+                    'type': msg_record['type'],
+                    'message': msg_record['message'],
+                    'username': msg_record['username'],
+                    'timestamp': msg_record['timestamp'],
+                    'is_own_message': msg_record['sender_address'] == client_address,  # Flag to identify own messages
+                    'group_name': group_name
+                }
+                message_history.append(history_msg)
+        else:
+            self.logger.warning(f"Group {group_name} has no message_history key!")
+
+        self.logger.info(f"Sending {len(message_history)} messages to {username} joining {group_name}")
 
         return {
             'status': 'success',
             'message': f'Joined group: {group_name}',
             'group_name': group_name,
-            'members': members
+            'members': members,
+            'message_history': message_history  # Include message history
         }
 
     def _handle_leave_group(self, params: Dict[str, Any], client_socket: socket.socket, client_address: Tuple[str, int]) -> Dict[str, Any]:

@@ -77,7 +77,9 @@ class ChatClient:
         """Join an existing group"""
         request = {
             'method': 'join_group',
-            'params': {'group_name': group_name}
+            'params': {
+                'group_name': group_name
+            }
         }
         try:
             self.socket.sendall(json.dumps(request).encode('utf-8'))
@@ -523,13 +525,14 @@ class LobbyWindow:
 class GeneralChatWindow:
     """Main chat window for General group (uses Tk as main window)"""
 
-    def __init__(self, username, client, group_name, members):
+    def __init__(self, username, client, group_name, members, message_history=None):
         self.username = username
         self.client = client
         self.group_name = group_name
         self.is_active = True
         self.refresh_job = None
         self.other_chat_window = None  # Track other group chat windows
+        self.message_history = message_history or []  # Store initial message history
 
         # Create main window (Tk instead of Toplevel)
         self.window = tk.Tk()
@@ -553,6 +556,10 @@ class GeneralChatWindow:
 
         # Update members list
         self._update_members_list(members)
+
+        # Display initial message history if available
+        if self.message_history:
+            self._display_message_history(self.message_history)
 
         # Start auto-refresh
         self._auto_refresh_members()
@@ -967,6 +974,9 @@ class GeneralChatWindow:
                     # Only open new window if it's not the General group
                     if group_name != self.group_name:
                         members = json_data.get('members', [])
+                        message_history = json_data.get('message_history', [])
+                        print(f"[DEBUG] GeneralChatWindow: creating ChatWindow for {group_name} with {len(message_history)} messages")
+
                         # Close previous other chat window if exists
                         if self.other_chat_window:
                             try:
@@ -975,8 +985,22 @@ class GeneralChatWindow:
                                 pass
                         # Hide General window
                         self.window.withdraw()
-                        # Open new chat window for other group
-                        self.other_chat_window = ChatWindow(self.username, self.client, group_name, members, self)
+                        # Open new chat window for other group with message history
+                        self.other_chat_window = ChatWindow(self.username, self.client, group_name, members, self, message_history)
+                        return
+                    else:
+                        # Client rejoined General group - clear chat display and show history
+                        message = json_data.get('message', '')
+                        if 'rejoined General' in message or 'Left group and rejoined General' in message:
+                            self._clear_chat_display()
+                            # Display message history if available
+                            message_history = json_data.get('message_history', [])
+                            if message_history:
+                                self._display_message_history(message_history)
+                            # Update members list
+                            members = json_data.get('members', [])
+                            if members:
+                                self._update_members_list(members)
                         return
             elif json_data['status'] == 'error':
                 message = json_data.get('message', 'Unknown error')
@@ -1028,7 +1052,45 @@ class GeneralChatWindow:
         """Show the window again"""
         self.client.message_handler = self._handle_message
         self.window.deiconify()
+
+        # Clear chat display when returning to General group
+        self._clear_chat_display()
+
         self.client.get_group_members()
+
+    def _clear_chat_display(self):
+        """Clear all messages from chat display"""
+        self.chat_display.config(state=tk.NORMAL)
+        self.chat_display.delete(1.0, tk.END)
+        self.chat_display.config(state=tk.DISABLED)
+
+    def _display_message_history(self, message_history):
+        """Display message history from server"""
+        if not message_history:
+            return
+
+        self.chat_display.config(state=tk.NORMAL)
+
+        for msg in message_history:
+            msg_type = msg.get('type', 'message')
+            username = msg.get('username', 'Unknown')
+            message = msg.get('message', '')
+            is_own_message = msg.get('is_own_message', False)
+
+            if msg_type == 'system':
+                self.chat_display.insert(tk.END, f"{message}\n", "system")
+            elif msg_type == 'message':
+                if is_own_message:
+                    # Own message - display on right
+                    self.chat_display.insert(tk.END, "You\n", "username_self")
+                    self.chat_display.insert(tk.END, f"{message}\n", "self")
+                else:
+                    # Other's message - display on left
+                    self.chat_display.insert(tk.END, f"{username}\n", "username_other")
+                    self.chat_display.insert(tk.END, f"{message}\n", "other")
+
+        self.chat_display.config(state=tk.DISABLED)
+        self.chat_display.see(tk.END)
 
     def _on_close(self):
         """Handle window close"""
@@ -1044,13 +1106,15 @@ class GeneralChatWindow:
 
 class ChatWindow:
     """Chat window for other groups (Toplevel)"""
-    def __init__(self, username, client, group_name, members, parent_window):
+    def __init__(self, username, client, group_name, members, parent_window, message_history=None):
         self.username = username
         self.client = client
         self.group_name = group_name
         self.parent_window = parent_window  # Can be GeneralChatWindow or LobbyWindow
         self.is_active = True  # Flag to track if window is active
         self.refresh_job = None  # Store refresh job ID
+        self.message_history = message_history or []  # Store initial message history
+        print(f"[DEBUG] ChatWindow constructor: received {len(self.message_history)} messages for group {group_name}")
 
         # Create window
         self.window = tk.Toplevel()
@@ -1071,6 +1135,10 @@ class ChatWindow:
 
         # Initialize members list
         self._update_users_list(members)
+
+        # Display initial message history if available (AFTER widgets are created)
+        if self.message_history:
+            self._display_message_history(self.message_history)
 
         # Start processing messages
         self.window.after(100, self._process_messages)
@@ -1244,7 +1312,7 @@ class ChatWindow:
         # Leave group
         self.client.leave_group()
 
-        # Set message handler back to parent
+        # Set message handler back to parent immediately so it can receive the leave_group response
         self.client.message_handler = self.parent_window._handle_message
 
         # Destroy window and show parent
@@ -1291,6 +1359,44 @@ class ChatWindow:
             display_name = username + (" (You)" if username == self.username else "")
             self.users_listbox.insert(tk.END, display_name)
 
+    def _display_message_history(self, message_history):
+        """Display message history from server"""
+        print(f"[DEBUG] _display_message_history called with {len(message_history) if message_history else 0} messages")
+        if not message_history:
+            print("[DEBUG] No message history to display")
+            return
+
+        # Clear existing messages first
+        self.chat_display.config(state=tk.NORMAL)
+        self.chat_display.delete(1.0, tk.END)
+
+        for msg in message_history:
+            msg_type = msg.get('type', 'message')
+            username = msg.get('username', 'Unknown')
+            message = msg.get('message', '')
+            is_own_message = msg.get('is_own_message', False)
+
+
+
+            if msg_type == 'system':
+                # Add system message directly without calling _add_system_message
+                self.chat_display.insert(tk.END, f"[SYSTEM] {message}\n", "system")
+            elif msg_type == 'message':
+                # Add chat message directly based on ownership
+                if is_own_message:
+                    # Own message - right aligned with blue bubble
+                    self.chat_display.insert(tk.END, f"{username}\n", "username_self")
+                    self.chat_display.insert(tk.END, f"  {message}  \n", "self_bubble")
+                    self.chat_display.insert(tk.END, "\n", "self_align")
+                else:
+                    # Other's message - left aligned with white bubble
+                    self.chat_display.insert(tk.END, f"{username}\n", "username_other")
+                    self.chat_display.insert(tk.END, f"  {message}  \n", "other_bubble")
+                    self.chat_display.insert(tk.END, "\n", "other_align")
+
+        self.chat_display.config(state=tk.DISABLED)
+        self.chat_display.see(tk.END)
+
     def _process_messages(self):
         """Process messages from queue"""
         if not self.is_active:
@@ -1316,10 +1422,19 @@ class ChatWindow:
             message = json_data.get('message', '')
 
             if status == 'success':
-                # Handle group members list
+                # Handle group members list and message history
                 if 'members' in json_data and 'group_name' in json_data:
                     members = json_data['members']
                     self._update_users_list(members)
+
+                    # Display message history if available (for new joins)
+                    message_history = json_data.get('message_history', [])
+                    print(f"[DEBUG] ChatWindow received message_history: {len(message_history) if message_history else 0} messages")
+                    if message_history:
+                        print(f"[DEBUG] First message: {message_history[0] if message_history else 'None'}")
+                        self._display_message_history(message_history)
+                    else:
+                        print("[DEBUG] No message history in server response")
                 elif message and not message.startswith('Message sent'):
                     self._add_system_message(message)
             elif status == 'error':
@@ -1367,7 +1482,7 @@ class ChatWindow:
         # Leave group
         self.client.leave_group()
 
-        # Set message handler back to parent
+        # Set message handler back to parent immediately so it can receive the leave_group response
         self.client.message_handler = self.parent_window._handle_message
 
         # Destroy window and show parent
@@ -1404,9 +1519,10 @@ def main():
             if response.get('status') == 'success' and 'group_name' in response:
                 group_name = response['group_name']
                 members = response.get('members', [])
+                message_history = response.get('message_history', [])
 
                 # Create main window (Tk) as ChatWindow for General group
-                main_window = GeneralChatWindow(username, client, group_name, members)
+                main_window = GeneralChatWindow(username, client, group_name, members, message_history)
                 main_window.run()
             else:
                 messagebox.showerror("Error", "Failed to join General group")

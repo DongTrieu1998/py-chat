@@ -183,6 +183,16 @@ class RpcServer:
         except Exception as e:
             self.logger.error(f"Error sending message to client: {e}")
 
+    def send_json_to_client_by_address(self, client_address: Tuple[str, int], data: Dict[str, Any]) -> None:
+        socket = None
+        for sock, addr in self.clients.items():
+            if addr == client_address:
+                socket = sock
+                break
+        if socket:
+            self.send_json_to_client(socket, data)
+        pass
+
     def send_json_to_client(self, client_socket: socket.socket, data: Dict[str, Any]) -> None:
         try:
             json_str = json.dumps(data)

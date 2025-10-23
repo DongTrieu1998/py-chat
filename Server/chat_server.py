@@ -113,7 +113,7 @@ class ChatServer:
         join_data = {
             'type': 'system',
             'message': f"{username} has joined the chat!",
-            'username': 'SYSTEM'
+            'username': 'SYSTEM0'
         }
         self.rpc_server.broadcast_json_message(join_data, client_socket)
 
@@ -325,7 +325,22 @@ class ChatServer:
                 self.logger.info(f"Created private chat {group_name} for users: {allowed_users}")
             else:
                 self.logger.warning(f"Could not extract both users from private chat name: {group_name}")
-
+            
+            notification_data = {
+                'type': 'private_chat_invitation',
+                'from_user': username,
+                'group_name': group_name
+            }
+            
+            invited_user = group_name.split('_')[1]
+            invited_user_address = None
+            for addr, name in self.user_names.items():
+                if name == invited_user:
+                    invited_user_address = addr
+                    break
+            print(f"=======================> Sending notification to {invited_user} ({invited_user_address})")
+            if invited_user_address: # TB lon thanh VN 
+                self.rpc_server.send_json_to_client_by_address(invited_user_address, notification_data)
         self.groups[group_name] = group_data
 
         # Add user to group

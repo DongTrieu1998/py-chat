@@ -580,6 +580,7 @@ class GeneralChatWindow:
         self.other_chat_window = None  # Track other group chat windows
         self.message_history = message_history or []  # Store initial message history
         self.pending_private_chat = None  # Store pending private chat group name
+        self.private_chat_invitations = set()  # Track users who sent private chat invitations
 
         # Create main window (Tk instead of Toplevel)
         self.window = tk.Tk()
@@ -987,7 +988,13 @@ class GeneralChatWindow:
         self.members_listbox.delete(0, tk.END)
         for member in members:
             prefix = "👤 " if member != self.username else "👤 (You) "
-            self.members_listbox.insert(tk.END, f"{prefix}{member}")
+            display_name = f"{prefix}{member}"
+
+            # Add red dot indicator if there's a private chat invitation from this user
+            if member in self.private_chat_invitations:
+                display_name = "🔴 " + display_name
+
+            self.members_listbox.insert(tk.END, display_name)
 
     def _on_member_double_click(self, event):
         """Handle double click on member in the list - Create private chat"""
@@ -996,15 +1003,21 @@ class GeneralChatWindow:
             index = selection[0]
             selected_member = self.members_listbox.get(index)
 
-            # Remove prefix "👤 " and " (You) " if present
-            selected_member = selected_member.replace("👤 ", "").replace("(You) ", "").strip()
-
+            # Remove prefix "� ", "�👤 " and " (You) " if present
+            # Remove prefix "🔴 ", "👤 " and " (You) " if present
+            selected_member = selected_member.replace("🔴 ", "").replace("👤 ", "").replace("(You) ", "").strip()
             # Don't create chat with yourself
             if selected_member == self.username:
                 print(f"✗ Cannot create private chat with yourself")
                 return
 
             print(f"✓ Double clicked on member: {selected_member}")
+
+            # Remove from invitation list if present
+            if selected_member in self.private_chat_invitations:
+                self.private_chat_invitations.discard(selected_member)
+                # Refresh the members list to remove the red dot
+                self.client.get_group_members()
 
             # Create a private group name (sorted to ensure consistency)
             users = sorted([self.username, selected_member])
@@ -1112,6 +1125,27 @@ class GeneralChatWindow:
             if message_group == self.group_name:
                 members = json_data.get('members', [])
                 self._update_members_list(members)
+            return
+        
+        if 'type' in json_data and json_data['type'] == 'private_chat_invitation':
+            from_user = json_data.get('from_user', 'Unknown')
+            group_name = json_data.get('group_name', 'Unknown')
+            print(f"----> Received private chat invitation from {from_user} (group: {group_name})")
+
+            # Add to invitation list
+            self.private_chat_invitations.add(from_user)
+
+            # Refresh members list IMMEDIATELY to show red dot indicator
+            # Get current members from listbox
+            current_members = []
+            for i in range(self.members_listbox.size()):
+                member_text = self.members_listbox.get(i)
+                # Remove all prefixes to get clean username
+                member = member_text.replace("🔴 ", "").replace("👤 ", "").replace("(You) ", "").strip()
+                current_members.append(member)
+
+            # Update display immediately
+            self._update_members_list(current_members)
             return
 
         # Handle chat messages
